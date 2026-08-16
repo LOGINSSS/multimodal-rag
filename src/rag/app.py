@@ -1,7 +1,7 @@
 """FastAPI 接口：健康检查 / 文档入库 / 问答。
 
 启动： uv run uvicorn rag.app:app --reload
-之后访问 http://127.0.0.1:8000/docs 查看交互式文档。
+之后访问 http://127.0.0.1:13080/docs 查看交互式文档。
 """
 from __future__ import annotations
 
