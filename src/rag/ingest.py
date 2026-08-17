@@ -159,9 +159,8 @@ def _ocr_image(path: Path) -> str:
 
 
 def ingest_image(path: Path) -> int:
-    """图片入库：OCR 文字 + VLM 描述分别作为一个 chunk，描述里附带 base64（供以后召回看图）。"""
+    """图片入库：OCR 文字 + VLM 描述分别作为一个 chunk。"""
     source = path.name
-    b64 = base64.b64encode(path.read_bytes()).decode()
 
     ocr_text = _ocr_image(path)
     description = _describe_image(path)
@@ -171,14 +170,14 @@ def ingest_image(path: Path) -> int:
         chunks.append(
             {
                 "text": f"[图片描述] {description}",
-                "metadata": json.dumps({"kind": "image_description", "image_base64": b64}, ensure_ascii=False),
+                "metadata": json.dumps({"kind": "image_description"}, ensure_ascii=False),
             }
         )
     if ocr_text:
         chunks.append(
             {
                 "text": f"[图片OCR文字] {ocr_text}",
-                "metadata": json.dumps({"kind": "image_ocr", "image_base64": b64}, ensure_ascii=False),
+                "metadata": json.dumps({"kind": "image_ocr"}, ensure_ascii=False),
             }
         )
     if not chunks:

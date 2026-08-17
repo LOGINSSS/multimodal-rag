@@ -9,9 +9,9 @@ from __future__ import annotations
 from typing import List
 
 import dashscope
-from dashscope import TextReRank
+from dashscope import TextEmbedding, TextReRank
 from langchain_deepseek import ChatDeepSeek
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_openai import ChatOpenAI
 
 from . import config
 
@@ -38,11 +38,39 @@ def _build_chat_llm():
     )
 
 
+class _DashScopeEmbeddings:
+    """DashScope text-embedding-v3 原生接口封装。
+
+    提供 langchain 兼容的 embed_documents / embed_query。
+    用原生 TextEmbedding（input.texts）而非 OpenAI 兼容端点，
+    因为兼容端点对 text-embedding-v3 会报 400（contents 字段不匹配）。
+    """
+
+    def __init__(self, model: str, api_key: str):
+        self.model = model
+        self.api_key = api_key
+
+    def _embed(self, texts: List[str]) -> List[List[float]]:
+        resp = TextEmbedding.call(
+            model=self.model,
+            input=list(texts),
+            api_key=self.api_key,
+        )
+        if resp.status_code != 200:  # type: ignore[attr-defined]
+            raise RuntimeError(f"embedding 失败: {resp.message}")  # type: ignore[attr-defined]
+        return [e["embedding"] for e in resp.output["embeddings"]]  # type: ignore[attr-defined]
+
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        return self._embed(texts)
+
+    def embed_query(self, text: str) -> List[float]:
+        return self._embed([text])[0]
+
+
 def _build_embeddings():
-    # DashScope embedding（OpenAI 兼容端点）
-    return OpenAIEmbeddings(
+    # DashScope text-embedding-v3（原生 TextEmbedding 接口）
+    return _DashScopeEmbeddings(
         model=config.DASHSCOPE_EMBEDDING_MODEL,
-        base_url=config.DASHSCOPE_BASE_URL,
         api_key=config.DASHSCOPE_API_KEY,
     )
 

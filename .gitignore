@@ -16,3 +16,9 @@ wheels/
 data/
 volumes/
 *.log
+
+# 沙箱环境重定向的缓存/安装目录
+.uv-cache/
+.uv-python/
+.npm-cache/
+frontend/node_modules/

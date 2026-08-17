@@ -1,15 +1,19 @@
 """Milvus 向量库：建集合 + 混合检索（BM25 全文 + 稠密向量，RRF 融合）。
 
-用 pymilvus 的 MilvusClient 直接操作，BM25 走 Milvus 2.5+ 的内置全文检索
-（text 字段 enable_analyzer=True），不需要手动生成稀疏向量。
+用 pymilvus 的 MilvusClient 直接操作，BM25 走 Milvus 2.5+ 的全文检索：
+text 字段 enable_analyzer=True + BM25 函数生成稀疏向量字段 sparse_bm25，
+混合检索时 BM25 一路检索 sparse_bm25（不能直接在 VARCHAR 字段上搜）。
 """
 from __future__ import annotations
 
+import logging
 from typing import Dict, List, Optional
 
-from pymilvus import AnnSearchRequest, DataType, MilvusClient, RRFRanker
+from pymilvus import AnnSearchRequest, DataType, Function, FunctionType, MilvusClient, RRFRanker
 
 from . import config, llm
+
+logger = logging.getLogger(__name__)
 
 # 懒连接：MilvusClient 构造时就会连服务器，没起 Docker 时会抛异常，
 # 所以首次真正使用时才建连接。
@@ -23,14 +27,15 @@ def get_client() -> MilvusClient:
     return _client
 
 
-def ensure_collection() -> None:
-    """建集合（若不存在）并建索引。幂等，可重复调用。"""
-    client = get_client()
-    if client.has_collection(config.MILVUS_COLLECTION):
-        return
-
-    # 字段：pk 主键 / text 全文检索字段(中文分词) / dense 稠密向量 / source 来源 / metadata 元数据JSON
-    schema = client.create_schema(auto_id=True, enable_dynamic_field=False)
+def _build_bm25_schema(client: MilvusClient):
+    """构造带 BM25 函数（text -> sparse_bm25 稀疏向量）的集合 schema。"""
+    bm25_function = Function(
+        name="bm25",
+        function_type=FunctionType.BM25,
+        input_field_names=["text"],
+        output_field_names=["sparse_bm25"],
+    )
+    schema = client.create_schema(auto_id=True, enable_dynamic_field=False, functions=[bm25_function])
     schema.add_field("pk", DataType.INT64, is_primary=True)
     schema.add_field(
         "text",
@@ -39,31 +44,73 @@ def ensure_collection() -> None:
         enable_analyzer=True,
         analyzer_params={"type": "chinese"},
     )
+    schema.add_field("sparse_bm25", DataType.SPARSE_FLOAT_VECTOR)
     schema.add_field("dense", DataType.FLOAT_VECTOR, dim=config.DENSE_DIM)
     schema.add_field("source", DataType.VARCHAR, max_length=512, nullable=True)
     schema.add_field("doc_type", DataType.VARCHAR, max_length=32, nullable=True)
     schema.add_field("metadata", DataType.VARCHAR, max_length=2048, nullable=True)
+    return schema
 
-    client.create_collection(config.MILVUS_COLLECTION, schema=schema)
 
-    # 索引：dense 用 COSINE（DashScope embedding 归一化后余弦最合适）
-    #       text 用 BM25 全文检索索引（Milvus 2.5+ 专用 metric_type）
+def _create_indexes(client: MilvusClient) -> None:
+    """dense(COSINE) + sparse_bm25(BM25) 双索引。"""
     dense_index = client.prepare_index_params()
-    dense_index.add_index(
-        field_name="dense",
-        metric_type="COSINE",
-        index_type="AUTOINDEX",
-    )
+    dense_index.add_index(field_name="dense", metric_type="COSINE", index_type="AUTOINDEX")
     client.create_index(config.MILVUS_COLLECTION, index_params=dense_index)
 
     bm25_index = client.prepare_index_params()
-    bm25_index.add_index(
-        field_name="text",
-        metric_type="BM25",
-        index_type="AUTOINDEX",
-    )
+    bm25_index.add_index(field_name="sparse_bm25", metric_type="BM25", index_type="SPARSE_INVERTED_INDEX")
     client.create_index(config.MILVUS_COLLECTION, index_params=bm25_index)
 
+
+def _migrate_legacy_collection(client: MilvusClient) -> None:
+    """旧结构集合（缺 sparse_bm25 字段）无损迁移：导出 → 重建 → 回填。
+
+    Milvus 2.5 不支持 AlterCollectionSchema，无法原地给集合加函数字段，
+    只能重建；重建前先把旧数据（text/dense/元数据）导出，重建后回填。
+    """
+    name = config.MILVUS_COLLECTION
+    client.load_collection(name)
+    rows = client.query(
+        name,
+        filter="pk >= 0",
+        output_fields=["text", "dense", "source", "doc_type", "metadata"],
+        limit=100000,
+    )
+    client.drop_collection(name)
+    client.create_collection(name, schema=_build_bm25_schema(client))
+    _create_indexes(client)
+    data = [
+        {
+            "text": r["text"],
+            "dense": r["dense"],
+            "source": r.get("source"),
+            "doc_type": r.get("doc_type"),
+            "metadata": r.get("metadata"),
+        }
+        for r in rows
+    ]
+    if data:
+        client.insert(name, data=data)
+    client.load_collection(name)
+
+
+def ensure_collection() -> None:
+    """建集合（若不存在）并建索引。幂等，可重复调用。
+
+    若发现旧结构集合（缺 sparse_bm25 字段），自动做无损迁移。
+    """
+    client = get_client()
+    if client.has_collection(config.MILVUS_COLLECTION):
+        desc = client.describe_collection(config.MILVUS_COLLECTION)
+        fields = {f["name"] for f in desc.get("fields", [])}
+        if "sparse_bm25" not in fields:
+            logger.warning("检测到旧结构集合（缺 sparse_bm25 字段），执行无损迁移…")
+            _migrate_legacy_collection(client)
+        return
+
+    client.create_collection(config.MILVUS_COLLECTION, schema=_build_bm25_schema(client))
+    _create_indexes(client)
     client.load_collection(config.MILVUS_COLLECTION)
 
 
@@ -93,10 +140,10 @@ def hybrid_search(
     fetch_k = fetch_k or config.HYBRID_FETCH_K
     client = get_client()
 
-    # 一路：BM25 全文检索（data 直接传原始 query 文本）
+    # 一路：BM25 全文检索（搜 BM25 函数生成的稀疏向量字段）
     bm25_req = AnnSearchRequest(
         data=[query],
-        anns_field="text",
+        anns_field="sparse_bm25",
         param={"metric_type": "BM25"},
         limit=fetch_k,
         expr=expr,
