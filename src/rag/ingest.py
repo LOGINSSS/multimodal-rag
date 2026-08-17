@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import re
 import shutil
 import subprocess
 import sys
@@ -92,15 +93,124 @@ def _pdf_to_markdown(path: Path) -> str:
         shutil.rmtree(workdir, ignore_errors=True)
 
 
+_HEADING_STYLE_RE = re.compile(r"^(?:heading|标题)\s*(\d+)$", re.IGNORECASE)
+
+
+def _heading_level(style_name: str) -> int:
+    """把 Word 段落样式名映射为 markdown 标题级别（1~6），非标题返回 0。
+
+    兼容英文（Heading 1 / heading1）与中文（标题 1 / 标题1）样式名；
+    Title/标题 也按一级标题处理。
+    """
+    name = (style_name or "").strip()
+    m = _HEADING_STYLE_RE.match(name)
+    if m:
+        return min(int(m.group(1)), 6)
+    if name.lower() in {"title", "标题"}:
+        return 1
+    return 0
+
+
+def _iter_docx_blocks(parent):
+    """按文档顺序产出段落(Paragraph)与表格(Table)块。"""
+    from docx.oxml.ns import qn
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
+    for child in parent.element.body.iterchildren():
+        if child.tag == qn("w:p"):
+            yield Paragraph(child, parent)
+        elif child.tag == qn("w:tbl"):
+            yield Table(child, parent)
+
+
+def _table_to_markdown(table) -> str:
+    """python-docx 表格 → markdown 表格字符串。处理合并单元格（同行按 tc 去重）。"""
+    rows = []
+    for row in table.rows:
+        cells, seen = [], set()
+        for cell in row.cells:
+            if id(cell._tc) in seen:  # 横向合并：同一 tc 重复出现
+                continue
+            seen.add(id(cell._tc))
+            cells.append(" ".join(cell.text.split()))
+        rows.append(cells)
+    if not rows:
+        return ""
+    width = max(len(r) for r in rows)
+    rows = [r + [""] * (width - len(r)) for r in rows]
+    out = ["| " + " | ".join(rows[0]) + " |", "| " + " | ".join(["---"] * width) + " |"]
+    out += ["| " + " | ".join(r) + " |" for r in rows[1:]]
+    return "\n".join(out)
+
+
+_TABLE_BAND_MAX_CHARS = 1000
+
+
+def _split_table_bands(md_table: str, max_chars: int = _TABLE_BAND_MAX_CHARS) -> List[str]:
+    """超大 markdown 表格按行分带：每组重复表头+分隔行，避免单 chunk 过大。"""
+    lines = md_table.splitlines()
+    if len(lines) <= 3:
+        return [md_table] if md_table else []
+    header, sep, data = lines[0], lines[1], lines[2:]
+    bands: List[str] = []
+    cur, cur_len = [header, sep], len(header) + len(sep)
+    for line in data:
+        if cur_len + len(line) > max_chars and len(cur) > 2:
+            bands.append("\n".join(cur))
+            cur, cur_len = [header, sep], len(header) + len(sep)
+        cur.append(line)
+        cur_len += len(line)
+    if len(cur) > 2:
+        bands.append("\n".join(cur))
+    return bands
+
+
+def _extract_docx(path: Path):
+    """docx → (markdown正文, 表格chunks)。
+
+    按文档顺序迭代：段落按标题归组（标题转 markdown 走原有结构化切分）；
+    每个表格序列化为 markdown 表格并作为原子 chunk（metadata 带当前标题层级
+    作上下文），不走字符兜底切分，保证表格不被切碎。
+    """
+    import docx
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
+    doc = docx.Document(str(path))
+    lines: List[str] = []
+    table_chunks: List[Dict] = []
+    headers: Dict[int, str] = {}
+
+    for block in _iter_docx_blocks(doc):
+        if isinstance(block, Paragraph):
+            text = block.text.strip()
+            if not text:
+                continue
+            level = _heading_level(block.style.name if block.style else "")
+            if level:
+                headers = {k: v for k, v in headers.items() if k < level}
+                headers[level] = text
+                lines.append(f"{'#' * level} {text}")
+            else:
+                lines.append(text)
+        elif isinstance(block, Table):
+            md = _table_to_markdown(block)
+            if not md:
+                continue
+            meta: Dict = {"table": True}
+            meta.update({f"h{k}": v for k, v in headers.items()})
+            for band in _split_table_bands(md):
+                table_chunks.append({"text": band, "metadata": meta})
+    return "\n".join(lines), table_chunks
+
+
 def _extract_text(path: Path) -> str:
     ext = path.suffix.lower()
     if ext in {".md", ".markdown", ".txt"}:
         return path.read_text(encoding="utf-8", errors="ignore")
     if ext == ".docx":
-        import docx  # python-docx
-
-        doc = docx.Document(str(path))
-        return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+        return _extract_docx(path)[0]
     if ext == ".pptx":
         from pptx import Presentation  # python-pptx
 
@@ -218,7 +328,11 @@ def ingest_file(path: str | Path) -> int:
     if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".webp"}:
         return ingest_image(path)
 
-    text = _extract_text(path)
-    chunks = split_text(text)
     doc_type = path.suffix.lower().lstrip(".")
+
+    if path.suffix.lower() == ".docx":
+        md_text, table_chunks = _extract_docx(path)
+        chunks = split_text(md_text) + table_chunks
+    else:
+        chunks = split_text(_extract_text(path))
     return _embed_and_insert(chunks, path.name, doc_type)
