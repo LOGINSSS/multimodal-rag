@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Dict, List
 
@@ -71,7 +72,7 @@ def _pdf_to_markdown(path: Path) -> str:
     以子进程方式运行，把 PyTorch 模型隔离在独立进程里，不污染 FastAPI 进程。
     产出的 markdown 会继续走 split_text() 的结构化分片。
     """
-    workdir = Path(tempfile.mkdtemp(prefix="mineru_", dir=config.DATA_DIR))
+    workdir = _mkdtemp("mineru_", config.DATA_DIR)
     try:
         cmd = [
             _mineru_exe(),
@@ -205,6 +206,230 @@ def _extract_docx(path: Path):
     return "\n".join(lines), table_chunks
 
 
+# ---------- PPTX 处理 ----------
+
+_PPTX_IMAGE_MIN_PX = 80  # 小于该尺寸的图片视为装饰，丢弃
+
+
+def _mkdtemp(prefix: str, dir: Path) -> Path:
+    """创建可写的临时目录。
+
+    沙箱环境下 tempfile.mkdtemp 建出的目录带受限 ACL（创建者都写不进），
+    这里用普通 mkdir 替代（实测可写）。
+    """
+    for _ in range(100):
+        p = dir / f"{prefix}{uuid.uuid4().hex[:10]}"
+        try:
+            p.mkdir()
+            return p
+        except FileExistsError:
+            continue
+    raise RuntimeError("无法创建临时目录")
+
+
+def _iter_pptx_shapes(shapes):
+    """递归展开 pptx shapes（GROUP 内部也遍历）。"""
+    from pptx.enum.shapes import MSO_SHAPE_TYPE
+
+    for shape in shapes:
+        if shape.shape_type == MSO_SHAPE_TYPE.GROUP:
+            yield from _iter_pptx_shapes(shape.shapes)
+        else:
+            yield shape
+
+
+def _chart_to_markdown(chart) -> str:
+    """python-pptx 图表 → markdown 表格（首列类别，其余列为系列）。"""
+    rows = []
+    for plot in chart.plots:
+        cats = [str(c) for c in plot.categories]
+        series = list(plot.series)
+        if not series:
+            continue
+        rows.append(["类别"] + [str(s.name) for s in series])
+        for i, cat in enumerate(cats):
+            row = [cat]
+            for s in series:
+                try:
+                    row.append(str(s.values[i]))
+                except Exception:  # noqa: BLE001 —— 值缺失补空
+                    row.append("")
+            rows.append(row)
+    if not rows:
+        return ""
+    width = max(len(r) for r in rows)
+    rows = [r + [""] * (width - len(r)) for r in rows]
+    out = ["| " + " | ".join(rows[0]) + " |", "| " + " | ".join(["---"] * width) + " |"]
+    out += ["| " + " | ".join(r) + " |" for r in rows[1:]]
+    return "\n".join(out)
+
+
+def _save_pptx_picture(shape, pptx_path: Path):
+    """把 pptx 里的图片导出为临时 PNG 文件，返回 (文件路径, 临时目录)；
+    失败（如 WMF/EMF 等 PIL 打不开的格式）返回 (None, None)。"""
+    try:
+        from PIL import Image
+
+        blob = shape.image.blob
+        ext = (shape.image.ext or "png").lower()
+        tmp = _mkdtemp("pptx_pic_", config.DATA_DIR)
+        try:
+            raw = tmp / f"pic_{uuid.uuid4().hex[:8]}.{ext}"
+            raw.write_bytes(blob)
+            img = Image.open(raw)
+            img.load()
+            if ext != "png":
+                png = tmp / f"{raw.stem}.png"
+                img.convert("RGB").save(png)
+                return png, tmp
+            return raw, tmp
+        except Exception:  # noqa: BLE001 —— 单张图片失败不阻断
+            shutil.rmtree(tmp, ignore_errors=True)
+            return None, None
+    except Exception:  # noqa: BLE001
+        return None, None
+
+
+def _picture_chunks(path: Path) -> List[Dict]:
+    """单张图片 → [图片描述, 图片OCR] chunks（供入库/pptx 内嵌图片复用）。"""
+    ocr_text = _ocr_image(path)
+    description = _describe_image(path)
+    chunks: List[Dict] = []
+    if description:
+        chunks.append(
+            {
+                "text": f"[图片描述] {description}",
+                "metadata": json.dumps({"kind": "image_description"}, ensure_ascii=False),
+            }
+        )
+    if ocr_text:
+        chunks.append(
+            {
+                "text": f"[图片OCR文字] {ocr_text}",
+                "metadata": json.dumps({"kind": "image_ocr"}, ensure_ascii=False),
+            }
+        )
+    return chunks
+
+
+def _render_pptx_pages(pptx_path: Path, page_numbers: List[int]) -> Dict[int, str]:
+    """用 PowerPoint COM（powershell 子进程）把无文本页渲染成 PNG，再 OCR 出文字。
+
+    尽力而为：渲染或 OCR 失败时该页返回空文本，不影响其他页。
+    """
+    if not page_numbers:
+        return {}
+    out_dir = _mkdtemp("pptx_render_", config.DATA_DIR)
+    try:
+        esc = lambda s: s.replace("'", "''")  # noqa: E731 —— PS 单引号转义
+        pages_csv = ",".join(str(n) for n in page_numbers)
+        script = (
+            "$ErrorActionPreference='Stop'\n"
+            "$ppt=New-Object -ComObject PowerPoint.Application\n"
+            "try {\n"
+            f"  $pres=$ppt.Presentations.Open('{esc(str(pptx_path.resolve()))}')\n"
+            "  Start-Sleep -Milliseconds 800\n"
+            f"  foreach($n in @({pages_csv})){{ $pres.Slides.Item($n).Export('{esc(str(out_dir))}\\slide_'+$n+'.png','PNG',1280,720) }}\n"
+            "  $pres.Close()\n"
+            "} finally { $ppt.Quit() }\n"
+        )
+        subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+            check=False,
+            timeout=180,
+        )
+    except Exception:  # noqa: BLE001 —— 渲染失败直接放弃兜底
+        logger.warning("PPTX 无文本页渲染失败：%s", pptx_path.name)
+        return {}
+    texts: Dict[int, str] = {}
+    try:
+        for n in page_numbers:
+            png = out_dir / f"slide_{n}.png"
+            if png.exists():
+                t = _ocr_image(png)
+                if t:
+                    texts[n] = t
+    finally:
+        shutil.rmtree(out_dir, ignore_errors=True)
+    return texts
+
+
+def _extract_pptx(path: Path):
+    """pptx → (markdown正文, 额外chunks)。
+
+    结构化提取：文本按页组织（`## 第 N 页`）；表格/图表转 markdown 表格 chunk；
+    有意义的图片（尺寸够大）走 Qwen-VL 描述 + OCR；无文字的自选图形/连线丢弃；
+    整页无任何内容（纯装饰/纯图片且无文本）时用 PowerPoint 渲染 + OCR 兜底。
+    """
+    from pptx import Presentation
+    from pptx.enum.shapes import MSO_SHAPE_TYPE
+
+    prs = Presentation(str(path))
+    lines: List[str] = []
+    chunks: List[Dict] = []
+    textless: List[int] = []
+    pic_tmp_dirs: List[Path] = []
+
+    for idx, slide in enumerate(prs.slides, start=1):
+        page_lines = [f"## 第 {idx} 页"]
+        has_text = False
+        for shape in _iter_pptx_shapes(slide.shapes):
+            st = shape.shape_type
+            if st == MSO_SHAPE_TYPE.PICTURE:
+                w_px = shape.width / 914400 * 96
+                h_px = shape.height / 914400 * 96
+                if w_px < _PPTX_IMAGE_MIN_PX or h_px < _PPTX_IMAGE_MIN_PX:
+                    continue  # 装饰小图，丢弃
+                png, tmpdir = _save_pptx_picture(shape, path)
+                if png:
+                    pic_tmp_dirs.append(tmpdir)
+                    chunks.extend(_picture_chunks(png))
+                    has_text = True
+                continue
+            if st == MSO_SHAPE_TYPE.CHART:
+                md = _chart_to_markdown(shape.chart)
+                if md:
+                    chunks.append(
+                        {
+                            "text": md,
+                            "metadata": json.dumps({"kind": "table", "page": idx}, ensure_ascii=False),
+                        }
+                    )
+                has_text = True
+                continue
+            if st == MSO_SHAPE_TYPE.TABLE:
+                md = _table_to_markdown(shape.table)
+                if md:
+                    chunks.append(
+                        {
+                            "text": md,
+                            "metadata": json.dumps({"kind": "table", "page": idx}, ensure_ascii=False),
+                        }
+                    )
+                has_text = True
+                continue
+            if shape.has_text_frame:
+                t = shape.text_frame.text.strip()
+                if t:
+                    page_lines.append(t)
+                    has_text = True
+
+        if has_text:
+            lines.append("\n".join(page_lines))
+        else:
+            textless.append(idx)
+
+    if textless:
+        rendered = _render_pptx_pages(path, textless)
+        for n, txt in rendered.items():
+            lines.append(f"## 第 {n} 页\n{txt}")
+
+    for d in pic_tmp_dirs:
+        shutil.rmtree(d, ignore_errors=True)
+
+    return "\n".join(lines), chunks
+
+
 def _extract_text(path: Path) -> str:
     ext = path.suffix.lower()
     if ext in {".md", ".markdown", ".txt"}:
@@ -212,15 +437,7 @@ def _extract_text(path: Path) -> str:
     if ext == ".docx":
         return _extract_docx(path)[0]
     if ext == ".pptx":
-        from pptx import Presentation  # python-pptx
-
-        prs = Presentation(str(path))
-        parts = []
-        for slide in prs.slides:
-            for shape in slide.shapes:
-                if hasattr(shape, "text") and shape.text.strip():
-                    parts.append(shape.text)
-        return "\n".join(parts)
+        return _extract_pptx(path)[0]
     if ext == ".pdf":
         try:
             return _pdf_to_markdown(path)
@@ -270,29 +487,10 @@ def _ocr_image(path: Path) -> str:
 
 def ingest_image(path: Path) -> int:
     """图片入库：OCR 文字 + VLM 描述分别作为一个 chunk。"""
-    source = path.name
-
-    ocr_text = _ocr_image(path)
-    description = _describe_image(path)
-
-    chunks = []
-    if description:
-        chunks.append(
-            {
-                "text": f"[图片描述] {description}",
-                "metadata": json.dumps({"kind": "image_description"}, ensure_ascii=False),
-            }
-        )
-    if ocr_text:
-        chunks.append(
-            {
-                "text": f"[图片OCR文字] {ocr_text}",
-                "metadata": json.dumps({"kind": "image_ocr"}, ensure_ascii=False),
-            }
-        )
+    chunks = _picture_chunks(path)
     if not chunks:
         return 0
-    return _embed_and_insert(chunks, source, "image")
+    return _embed_and_insert(chunks, path.name, "image")
 
 
 # ---------- 核心入库 ----------
@@ -333,6 +531,9 @@ def ingest_file(path: str | Path) -> int:
     if path.suffix.lower() == ".docx":
         md_text, table_chunks = _extract_docx(path)
         chunks = split_text(md_text) + table_chunks
+    elif path.suffix.lower() == ".pptx":
+        md_text, extra_chunks = _extract_pptx(path)
+        chunks = split_text(md_text) + extra_chunks
     else:
         chunks = split_text(_extract_text(path))
     return _embed_and_insert(chunks, path.name, doc_type)
