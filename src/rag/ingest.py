@@ -430,6 +430,33 @@ def _extract_pptx(path: Path):
     return "\n".join(lines), chunks
 
 
+def _pdf_pages_ocr(path: Path) -> str:
+    """扫描版 PDF 兜底：逐页渲染成 PNG，再用 RapidOCR 提取文字。
+
+    用于 MinerU 失败且 PyMuPDF 提取不到内嵌文字（扫描件）的情况。
+    失败返回空串，不阻断入库。
+    """
+    try:
+        import fitz
+
+        doc = fitz.open(str(path))
+        tmp = _mkdtemp("pdf_ocr_", config.DATA_DIR)
+        parts: List[str] = []
+        try:
+            for i, page in enumerate(doc, start=1):
+                pix = page.get_pixmap(dpi=150)
+                png = tmp / f"p{i}.png"
+                pix.save(str(png))
+                t = _ocr_image(png)
+                if t:
+                    parts.append(f"## 第 {i} 页\n{t}")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        return "\n".join(parts)
+    except Exception:  # noqa: BLE001 —— OCR 兜底失败不阻断
+        return ""
+
+
 def _extract_text(path: Path) -> str:
     ext = path.suffix.lower()
     if ext in {".md", ".markdown", ".txt"}:
@@ -448,7 +475,15 @@ def _extract_text(path: Path) -> str:
         import fitz  # PyMuPDF 兜底
 
         doc = fitz.open(str(path))
-        return "\n".join(page.get_text() for page in doc)
+        text = "\n".join(page.get_text() for page in doc)
+        if text.strip():
+            return text
+        # 扫描版 PDF：无内嵌文字 → 渲染每页 + RapidOCR 兜底
+        ocr_text = _pdf_pages_ocr(path)
+        if ocr_text.strip():
+            logger.info("扫描版 PDF 已通过 RapidOCR 提取文字：%s", path.name)
+            return ocr_text
+        return text
     raise ValueError(f"不支持的文档类型: {ext}")
 
 
@@ -496,6 +531,8 @@ def ingest_image(path: Path) -> int:
 # ---------- 核心入库 ----------
 
 def _embed_and_insert(chunks: List[Dict], source: str, doc_type: str) -> int:
+    if not chunks:
+        return 0  # 空文档不入库，避免对空列表调 embedding 报错
     texts = [c["text"] for c in chunks]
     vectors = llm.embeddings.embed_documents(texts)
     data = [
