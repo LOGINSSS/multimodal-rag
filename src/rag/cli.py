@@ -9,7 +9,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="rag", description="RAG 命令行工具")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("serve", help="启动 FastAPI 服务（uvicorn）")
+    p_serve = sub.add_parser("serve", help="启动 FastAPI 服务（uvicorn）")
+    p_serve.add_argument(
+        "--reload",
+        action="store_true",
+        help="开发模式：代码变更自动重启（注意会中断正在进行的入库任务，如 MinerU 解析）",
+    )
 
     p_ingest = sub.add_parser("ingest", help="入库文档")
     p_ingest.add_argument("path", help="文档或图片路径")
@@ -24,7 +29,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "serve":
         import uvicorn
 
-        uvicorn.run("rag.app:app", host="127.0.0.1", port=13080, reload=True)
+        # 默认关闭 reload：热重载会在入库（MinerU 子进程）进行中被文件变化打断，
+        # 需要自动重启时显式加 --reload。
+        uvicorn.run("rag.app:app", host="127.0.0.1", port=13080, reload=args.reload)
         return 0
 
     if args.cmd == "ingest":
