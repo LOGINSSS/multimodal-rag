@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import shutil
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -18,6 +19,10 @@ from .graph import run_rag
 from .observability import get_langfuse_callback
 
 app = FastAPI(title="RAG 后端", version="0.1.0")
+
+# 入库并发锁：MinerU 等解析任务很重，同一时间只允许一个入库任务
+# （前端已锁按钮，这里兜底防直接调 URL 并发）
+_INGEST_LOCK = threading.Lock()
 
 # 允许前端 dev server 跨域访问（Vite 端口 18080）
 app.add_middleware(
@@ -80,7 +85,7 @@ def ingest_upload(file: UploadFile = File(...)) -> IngestResponse:
     """上传文档（md/txt/docx/pptx/pdf/图片）入库。
 
     用同步 def（FastAPI 会自动放到线程池），避免 MinerU 等长任务
-    阻塞事件循环导致整个服务卡死。
+    阻塞事件循环导致整个服务卡死。用全局锁拒绝并发入库。
     """
     suffix = Path(file.filename or "").suffix.lower()
     allowed = {".md", ".markdown", ".txt", ".docx", ".pptx", ".pdf",
@@ -88,17 +93,22 @@ def ingest_upload(file: UploadFile = File(...)) -> IngestResponse:
     if suffix not in allowed:
         raise HTTPException(status_code=400, detail=f"不支持的文件类型: {suffix}")
 
-    tmp_path = config.DATA_DIR / (file.filename or "upload")
-    with tmp_path.open("wb") as f:
-        shutil.copyfileobj(file.file, f)
+    if not _INGEST_LOCK.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="已有入库任务进行中，请稍候再试")
 
+    tmp_path = config.DATA_DIR / (file.filename or "upload")
     try:
+        with tmp_path.open("wb") as f:
+            shutil.copyfileobj(file.file, f)
         n = ingest.ingest_file(tmp_path)
+        return IngestResponse(inserted=n)
+    except HTTPException:
+        raise
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"入库失败: {e}")
     finally:
         tmp_path.unlink(missing_ok=True)
-    return IngestResponse(inserted=n)
+        _INGEST_LOCK.release()
 
 
 @app.post("/ingest/text", response_model=IngestResponse)

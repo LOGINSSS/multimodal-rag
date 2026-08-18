@@ -35,7 +35,8 @@ export function Composer({ onSend, onUpload, uploading }: Props) {
         <button
           className="icon-btn"
           onClick={() => fileRef.current?.click()}
-          title="上传文档"
+          disabled={uploading}
+          title={uploading ? "正在入库中…" : "上传文档"}
           aria-label="上传文档"
         >
           <svg

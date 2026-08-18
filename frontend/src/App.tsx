@@ -30,6 +30,7 @@ export default function App() {
   const [uploading, setUploading] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const chatRef = useRef<HTMLDivElement>(null);
+  const uploadingRef = useRef(false);
 
   // 应用主题到 <html>
   useEffect(() => {
@@ -99,8 +100,10 @@ export default function App() {
 
   const handleUpload = useCallback(
     async (files: FileList) => {
+      if (uploadingRef.current) return; // 防重入：一个入库任务进行中时忽略新的上传
       const list = Array.from(files);
       if (!list.length) return;
+      uploadingRef.current = true;
       setUploading(true);
       try {
         for (const file of list) {
@@ -113,6 +116,7 @@ export default function App() {
       } catch (e) {
         showToast(`上传失败：${(e as Error).message}`);
       } finally {
+        uploadingRef.current = false;
         setUploading(false);
       }
     },

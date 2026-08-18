@@ -582,6 +582,16 @@ body {
   color: var(--accent);
 }
 
+.icon-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.icon-btn:disabled:hover {
+  background: transparent;
+  color: var(--muted);
+}
+
 .icon-btn svg {
   width: 20px;
   height: 20px;
