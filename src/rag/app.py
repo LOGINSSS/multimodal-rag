@@ -76,8 +76,12 @@ def health() -> dict:
 
 
 @app.post("/ingest", response_model=IngestResponse)
-async def ingest_upload(file: UploadFile = File(...)) -> IngestResponse:
-    """上传文档（md/txt/docx/pptx/pdf/图片）入库。"""
+def ingest_upload(file: UploadFile = File(...)) -> IngestResponse:
+    """上传文档（md/txt/docx/pptx/pdf/图片）入库。
+
+    用同步 def（FastAPI 会自动放到线程池），避免 MinerU 等长任务
+    阻塞事件循环导致整个服务卡死。
+    """
     suffix = Path(file.filename or "").suffix.lower()
     allowed = {".md", ".markdown", ".txt", ".docx", ".pptx", ".pdf",
                ".png", ".jpg", ".jpeg", ".bmp", ".webp"}
