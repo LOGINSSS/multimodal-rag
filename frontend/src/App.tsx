@@ -29,7 +29,6 @@ function getInitialTheme(): Theme {
 export default function App() {
   const [theme, setTheme] = useState<Theme>(getInitialTheme);
   const [messages, setMessages] = useState<MessageType[]>([]);
-  const [rows, setRows] = useState<number | null>(null);
   const [online, setOnline] = useState(false);
   const [uploads, setUploads] = useState<UploadItem[]>([]);
   const [dragging, setDragging] = useState(false);
@@ -49,10 +48,7 @@ export default function App() {
   // 启动时检查后端健康
   useEffect(() => {
     health()
-      .then((h) => {
-        setOnline(h.milvus_ok);
-        setRows(h.rows);
-      })
+      .then((h) => setOnline(h.milvus_ok))
       .catch(() => setOnline(false));
   }, []);
 
@@ -74,10 +70,7 @@ export default function App() {
 
   const refreshHealth = useCallback(() => {
     health()
-      .then((h) => {
-        setRows(h.rows);
-        setOnline(h.milvus_ok);
-      })
+      .then((h) => setOnline(h.milvus_ok))
       .catch(() => setOnline(false));
   }, []);
 
@@ -320,7 +313,7 @@ export default function App() {
           </div>
           <span className="status">
             <span className="pulse" />
-            {online ? `已连接 · ${rows ?? 0} 片段` : "后端未连接"}
+            {online ? "已连接" : "后端未连接"}
           </span>
           <div className="header-spacer" />
           <ThemeToggle
