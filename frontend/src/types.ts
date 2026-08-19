@@ -33,6 +33,7 @@ export interface TaskStatus {
   inserted: number;
   error: string;
   conflict: boolean;
+  progress: number;
 }
 
 export interface UploadItem {
@@ -41,6 +42,7 @@ export interface UploadItem {
   status: "submitting" | TaskStatusValue;
   inserted: number;
   error: string;
+  progress: number;
   taskId?: string;
 }
 

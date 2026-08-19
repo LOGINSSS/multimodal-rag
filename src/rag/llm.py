@@ -53,10 +53,12 @@ class _DashScopeEmbeddings:
     # DashScope text-embedding 单次请求最多 10 条
     _BATCH_SIZE = 10
 
-    def _embed(self, texts: List[str]) -> List[List[float]]:
+    def _embed(self, texts: List[str], progress_cb=None) -> List[List[float]]:
         # 分批调用，避免单次超过 DashScope 的 batch 上限（>10 报 400）
         out: List[List[float]] = []
-        for i in range(0, len(texts), self._BATCH_SIZE):
+        total = len(texts)
+        done = 0
+        for i in range(0, total, self._BATCH_SIZE):
             batch = list(texts[i : i + self._BATCH_SIZE])
             resp = TextEmbedding.call(
                 model=self.model,
@@ -66,10 +68,13 @@ class _DashScopeEmbeddings:
             if resp.status_code != 200:  # type: ignore[attr-defined]
                 raise RuntimeError(f"embedding 失败: {resp.message}")  # type: ignore[attr-defined]
             out.extend(e["embedding"] for e in resp.output["embeddings"])  # type: ignore[attr-defined]
+            done += len(batch)
+            if progress_cb and total:
+                progress_cb(done / total)
         return out
 
-    def embed_documents(self, texts: List[str]) -> List[List[float]]:
-        return self._embed(texts)
+    def embed_documents(self, texts: List[str], progress_cb=None) -> List[List[float]]:
+        return self._embed(texts, progress_cb)
 
     def embed_query(self, text: str) -> List[float]:
         return self._embed([text])[0]

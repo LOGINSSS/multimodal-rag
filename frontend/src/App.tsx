@@ -3,6 +3,7 @@ import { ask, deleteFile, health, listFiles, submitIngest, taskDecision, taskSta
 import { Composer } from "./components/Composer";
 import { FilesView } from "./components/FilesView";
 import { Message } from "./components/Message";
+import { ProgressRing } from "./components/ProgressRing";
 import { ThemeToggle } from "./components/ThemeToggle";
 import type { FileInfo, Message as MessageType, Theme, UploadItem } from "./types";
 
@@ -103,6 +104,7 @@ export default function App() {
                 status: "awaiting_decision",
                 inserted: 0,
                 error: "",
+                progress: 0,
                 taskId,
               }
             );
@@ -111,7 +113,13 @@ export default function App() {
           setUploads((prev) =>
             prev.map((u) =>
               u.id === itemId
-                ? { ...u, status: st.status, inserted: st.inserted, error: st.error }
+                ? {
+                    ...u,
+                    status: st.status,
+                    inserted: st.inserted,
+                    error: st.error,
+                    progress: st.progress ?? 0,
+                  }
                 : u
             )
           );
@@ -141,7 +149,14 @@ export default function App() {
         const itemId = nextUploadId();
         setUploads((prev) => [
           ...prev,
-          { id: itemId, name: file.name, status: "submitting", inserted: 0, error: "" },
+          {
+            id: itemId,
+            name: file.name,
+            status: "submitting",
+            inserted: 0,
+            error: "",
+            progress: 0,
+          },
         ]);
         submitIngest(file)
           .then(({ task_id }) => {
@@ -348,8 +363,8 @@ export default function App() {
                 u.status === "pending" ||
                 u.status === "running" ? (
                   <span className="upload-status running">
-                    <span className="spinner" />
-                    解析中…
+                    <ProgressRing percent={u.status === "submitting" ? 0 : u.progress ?? 0} size={26} />
+                    {u.status === "submitting" ? "上传中…" : `${u.progress ?? 0}%`}
                   </span>
                 ) : u.status === "awaiting_decision" ? (
                   <span className="upload-status running">等待处理同名文件…</span>

@@ -770,6 +770,26 @@ body {
   animation: spin 0.8s linear infinite;
 }
 
+/* 进度圈 */
+.progress-ring {
+  flex-shrink: 0;
+}
+
+.progress-ring-bg {
+  stroke: var(--border-strong);
+}
+
+.progress-ring-fg {
+  stroke: var(--accent);
+  transition: stroke-dashoffset 0.4s ease;
+}
+
+.progress-ring-text {
+  font-size: 8px;
+  font-weight: 600;
+  fill: var(--text);
+}
+
 /* 拖拽上传遮罩 */
 .drop-overlay {
   position: fixed;

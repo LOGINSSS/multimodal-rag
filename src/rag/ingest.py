@@ -520,21 +520,36 @@ def _ocr_image(path: Path) -> str:
         return ""
 
 
-def ingest_image(path: Path, source: str | None = None) -> int:
+def ingest_image(path: Path, source: str | None = None, progress_cb=None) -> int:
     """图片入库：OCR 文字 + VLM 描述分别作为一个 chunk。"""
     chunks = _picture_chunks(path)
     if not chunks:
         return 0
-    return _embed_and_insert(chunks, source or path.name, "image")
+    return _embed_and_insert(chunks, source or path.name, "image", progress_cb=progress_cb)
 
 
 # ---------- 核心入库 ----------
 
-def _embed_and_insert(chunks: List[Dict], source: str, doc_type: str) -> int:
+def _embed_and_insert(
+    chunks: List[Dict],
+    source: str,
+    doc_type: str,
+    progress_cb=None,
+) -> int:
+    """embedding + 写入 Milvus。
+
+    progress_cb(fraction: 0~1)：进度回调。约定 0.3 = 解析完成开始 embedding，
+    embedding 阶段 0.3→0.9，入库后 0.9。
+    """
     if not chunks:
         return 0  # 空文档不入库，避免对空列表调 embedding 报错
+    if progress_cb:
+        progress_cb(0.3)
     texts = [c["text"] for c in chunks]
-    vectors = llm.embeddings.embed_documents(texts)
+    vectors = llm.embeddings.embed_documents(
+        texts,
+        progress_cb=(lambda f: progress_cb(0.3 + 0.6 * f)) if progress_cb else None,
+    )
     data = [
         {
             "text": c["text"],
@@ -554,11 +569,16 @@ def ingest_text(text: str, source: str = "inline", doc_type: str = "text") -> in
     return _embed_and_insert(chunks, source, doc_type)
 
 
-def ingest_file(path: str | Path, source: str | None = None) -> int:
+def ingest_file(
+    path: str | Path,
+    source: str | None = None,
+    progress_cb=None,
+) -> int:
     """按文件类型入库，返回写入的 chunk 数。
 
     source 为显示用的文件名（默认取 path.name）；
     文件以 {doc_id}{ext} 存储时，外部应显式传入人类可读的文件名。
+    progress_cb(fraction: 0~1)：进度回调（见 _embed_and_insert）。
     """
     path = Path(path)
     if not path.exists():
@@ -566,7 +586,7 @@ def ingest_file(path: str | Path, source: str | None = None) -> int:
     source = source or path.name
 
     if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".webp"}:
-        return ingest_image(path, source)
+        return ingest_image(path, source, progress_cb=progress_cb)
 
     doc_type = path.suffix.lower().lstrip(".")
 
@@ -578,4 +598,4 @@ def ingest_file(path: str | Path, source: str | None = None) -> int:
         chunks = split_text(md_text) + extra_chunks
     else:
         chunks = split_text(_extract_text(path))
-    return _embed_and_insert(chunks, source, doc_type)
+    return _embed_and_insert(chunks, source, doc_type, progress_cb=progress_cb)

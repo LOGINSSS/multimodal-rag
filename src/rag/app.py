@@ -50,6 +50,7 @@ def _create_ingest_task(tmp_path: Path, filename: str) -> str:
             "source": filename,
             "inserted": 0,
             "error": "",
+            "progress": 0,
             "doc_id": doc_id,
             "conflict": conflict,
             "created_at": time.time(),
@@ -73,10 +74,16 @@ def _run_ingest(task_id: str) -> None:
         t = _TASKS[task_id]
         doc_id, filename = t["doc_id"], t["source"]
         t["status"] = "running"
-    try:
-        n = ingest.ingest_file(files.final_path(doc_id, filename), source=filename)
+        t["progress"] = 1  # 开始解析
+
+    def _cb(fraction: float) -> None:
         with _TASKS_LOCK:
-            t.update({"status": "done", "inserted": n})
+            t["progress"] = max(1, min(100, int(fraction * 100)))
+
+    try:
+        n = ingest.ingest_file(files.final_path(doc_id, filename), source=filename, progress_cb=_cb)
+        with _TASKS_LOCK:
+            t.update({"status": "done", "inserted": n, "progress": 100})
         files.update(doc_id, chunk_count=n, status="done")
     except Exception as e:  # noqa: BLE001
         with _TASKS_LOCK:
@@ -167,6 +174,7 @@ class TaskStatusResponse(BaseModel):
     inserted: int = 0
     error: str = ""
     conflict: bool = False
+    progress: int = 0
 
 
 class TaskDecisionRequest(BaseModel):
@@ -227,6 +235,7 @@ def task_status(task_id: str) -> TaskStatusResponse:
         inserted=t["inserted"],
         error=t["error"],
         conflict=t["conflict"],
+        progress=t.get("progress", 0),
     )
 
 
@@ -251,6 +260,7 @@ def task_decision(task_id: str, req: TaskDecisionRequest) -> TaskStatusResponse:
         inserted=t["inserted"],
         error=t["error"],
         conflict=t["conflict"],
+        progress=t.get("progress", 0),
     )
 
 
