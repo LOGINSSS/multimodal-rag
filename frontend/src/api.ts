@@ -1,4 +1,4 @@
-import type { AskResponse, HealthResponse } from "./types";
+import type { AskResponse, HealthResponse, TaskStatus } from "./types";
 
 // 后端地址：可建 .env 用 VITE_API_BASE 覆盖
 const BASE = import.meta.env.VITE_API_BASE ?? "http://127.0.0.1:13080";
@@ -26,13 +26,17 @@ export function ask(question: string): Promise<AskResponse> {
   });
 }
 
-export function ingest(file: File): Promise<{ inserted: number }> {
+export function submitIngest(file: File): Promise<{ task_id: string }> {
   const form = new FormData();
   form.append("file", file);
-  return request<{ inserted: number }>("/ingest", {
+  return request<{ task_id: string }>("/ingest", {
     method: "POST",
     body: form,
   });
+}
+
+export function taskStatus(taskId: string): Promise<TaskStatus> {
+  return request<TaskStatus>(`/task/${taskId}`);
 }
 
 export function health(): Promise<HealthResponse> {

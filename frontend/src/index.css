@@ -627,23 +627,81 @@ body {
   height: 20px;
 }
 
-/* 上传中的提示条 */
-.uploading {
+/* 异步入库任务列表 */
+.uploads {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 14px;
+  max-height: 140px;
+  overflow-y: auto;
+}
+
+.upload-item {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-top: 10px;
+  gap: 10px;
   font-size: 13px;
+  padding: 5px 10px;
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+
+.upload-item .upload-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.upload-item .upload-status {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.upload-status.running {
   color: var(--muted);
 }
 
-.uploading .spinner {
-  width: 13px;
-  height: 13px;
+.upload-status.done {
+  color: var(--ok, #2e9e5b);
+}
+
+.upload-status.failed {
+  color: var(--danger);
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.upload-status .spinner {
+  width: 12px;
+  height: 12px;
   border: 2px solid var(--border-strong);
   border-top-color: var(--accent);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
+}
+
+/* 拖拽上传遮罩 */
+.drop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--surface) 75%, transparent);
+  border: 2px dashed var(--accent);
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--accent);
+  pointer-events: none;
 }
 
 .toast {

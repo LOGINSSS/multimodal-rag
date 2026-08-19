@@ -18,6 +18,24 @@ export interface HealthResponse {
   error: string;
 }
 
+export type TaskStatusValue = "pending" | "running" | "done" | "failed";
+
+export interface TaskStatus {
+  task_id: string;
+  status: TaskStatusValue;
+  source: string;
+  inserted: number;
+  error: string;
+}
+
+export interface UploadItem {
+  id: string;
+  name: string;
+  status: "submitting" | TaskStatusValue;
+  inserted: number;
+  error: string;
+}
+
 export interface Message {
   id: string;
   role: "user" | "assistant";

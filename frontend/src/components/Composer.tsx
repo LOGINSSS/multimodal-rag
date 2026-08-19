@@ -3,13 +3,12 @@ import { useRef, useState } from "react";
 interface Props {
   onSend: (text: string) => void;
   onUpload: (files: FileList) => void;
-  uploading: boolean;
 }
 
 const ACCEPT =
   ".md,.markdown,.txt,.docx,.pptx,.pdf,.png,.jpg,.jpeg,.bmp,.webp";
 
-export function Composer({ onSend, onUpload, uploading }: Props) {
+export function Composer({ onSend, onUpload }: Props) {
   const [value, setValue] = useState("");
   const textRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -35,8 +34,7 @@ export function Composer({ onSend, onUpload, uploading }: Props) {
         <button
           className="icon-btn"
           onClick={() => fileRef.current?.click()}
-          disabled={uploading}
-          title={uploading ? "正在入库中…" : "上传文档"}
+          title="上传文档"
           aria-label="上传文档"
         >
           <svg
@@ -96,12 +94,6 @@ export function Composer({ onSend, onUpload, uploading }: Props) {
           </svg>
         </button>
       </div>
-      {uploading && (
-        <div className="uploading">
-          <span className="spinner" />
-          正在解析并写入知识库…
-        </div>
-      )}
     </div>
   );
 }

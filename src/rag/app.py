@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import shutil
 import threading
+import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
@@ -20,9 +23,42 @@ from .observability import get_langfuse_callback
 
 app = FastAPI(title="RAG 后端", version="0.1.0")
 
-# 入库并发锁：MinerU 等解析任务很重，同一时间只允许一个入库任务
-# （前端已锁按钮，这里兜底防直接调 URL 并发）
-_INGEST_LOCK = threading.Lock()
+# ---------- 入库异步任务池 ----------
+# /ingest 只负责收文件并提交任务（秒回 task_id），后台线程池并发解析；
+# 前端轮询 /task/{id} 获取进度，避免长任务（MinerU 解析）阻塞请求。
+
+_TASKS: dict[str, dict] = {}
+_TASKS_LOCK = threading.Lock()
+_EXECUTOR = ThreadPoolExecutor(max_workers=3)  # MinerU 较重，限制并发数
+
+
+def _submit_ingest(tmp_path: Path, filename: str) -> str:
+    task_id = uuid.uuid4().hex[:12]
+    with _TASKS_LOCK:
+        _TASKS[task_id] = {
+            "task_id": task_id,
+            "status": "pending",
+            "source": filename,
+            "inserted": 0,
+            "error": "",
+            "created_at": time.time(),
+        }
+    _EXECUTOR.submit(_run_ingest, task_id, tmp_path)
+    return task_id
+
+
+def _run_ingest(task_id: str, tmp_path: Path) -> None:
+    try:
+        with _TASKS_LOCK:
+            _TASKS[task_id]["status"] = "running"
+        n = ingest.ingest_file(tmp_path)
+        with _TASKS_LOCK:
+            _TASKS[task_id].update({"status": "done", "inserted": n})
+    except Exception as e:  # noqa: BLE001
+        with _TASKS_LOCK:
+            _TASKS[task_id].update({"status": "failed", "error": str(e)})
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
 # 允许前端 dev server 跨域访问（Vite 端口 18080）
 app.add_middleware(
@@ -59,6 +95,18 @@ class IngestResponse(BaseModel):
     inserted: int
 
 
+class IngestTaskResponse(BaseModel):
+    task_id: str
+
+
+class TaskStatusResponse(BaseModel):
+    task_id: str
+    status: str
+    source: str
+    inserted: int = 0
+    error: str = ""
+
+
 # ---------- 路由 ----------
 
 @app.get("/health")
@@ -80,12 +128,11 @@ def health() -> dict:
     }
 
 
-@app.post("/ingest", response_model=IngestResponse)
-def ingest_upload(file: UploadFile = File(...)) -> IngestResponse:
-    """上传文档（md/txt/docx/pptx/pdf/图片）入库。
+@app.post("/ingest", response_model=IngestTaskResponse)
+def ingest_upload(file: UploadFile = File(...)) -> IngestTaskResponse:
+    """上传文档（md/txt/docx/pptx/pdf/图片）入库（异步）。
 
-    用同步 def（FastAPI 会自动放到线程池），避免 MinerU 等长任务
-    阻塞事件循环导致整个服务卡死。用全局锁拒绝并发入库。
+    秒回 task_id，后台线程池解析入库；前端轮询 /task/{id} 查进度。
     """
     suffix = Path(file.filename or "").suffix.lower()
     allowed = {".md", ".markdown", ".txt", ".docx", ".pptx", ".pdf",
@@ -93,22 +140,27 @@ def ingest_upload(file: UploadFile = File(...)) -> IngestResponse:
     if suffix not in allowed:
         raise HTTPException(status_code=400, detail=f"不支持的文件类型: {suffix}")
 
-    if not _INGEST_LOCK.acquire(blocking=False):
-        raise HTTPException(status_code=409, detail="已有入库任务进行中，请稍候再试")
-
     tmp_path = config.DATA_DIR / (file.filename or "upload")
-    try:
-        with tmp_path.open("wb") as f:
-            shutil.copyfileobj(file.file, f)
-        n = ingest.ingest_file(tmp_path)
-        return IngestResponse(inserted=n)
-    except HTTPException:
-        raise
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"入库失败: {e}")
-    finally:
-        tmp_path.unlink(missing_ok=True)
-        _INGEST_LOCK.release()
+    with tmp_path.open("wb") as f:
+        shutil.copyfileobj(file.file, f)
+    task_id = _submit_ingest(tmp_path, file.filename or "upload")
+    return IngestTaskResponse(task_id=task_id)
+
+
+@app.get("/task/{task_id}", response_model=TaskStatusResponse)
+def task_status(task_id: str) -> TaskStatusResponse:
+    """查询入库任务状态（pending/running/done/failed）。"""
+    with _TASKS_LOCK:
+        t = _TASKS.get(task_id)
+    if not t:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    return TaskStatusResponse(
+        task_id=t["task_id"],
+        status=t["status"],
+        source=t["source"],
+        inserted=t["inserted"],
+        error=t["error"],
+    )
 
 
 @app.post("/ingest/text", response_model=IngestResponse)
