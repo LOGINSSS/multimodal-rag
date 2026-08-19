@@ -188,3 +188,13 @@ def count() -> int:
         return 0
     stats = client.get_collection_stats(config.MILVUS_COLLECTION)
     return stats.get("row_count", 0)
+
+
+def delete_by_source(source: str) -> int:
+    """删除指定来源（文件名）的全部 chunks，返回删除条数。"""
+    client = get_client()
+    if not client.has_collection(config.MILVUS_COLLECTION):
+        return 0
+    esc = source.replace("\\", "\\\\").replace('"', '\\"')
+    res = client.delete(config.MILVUS_COLLECTION, filter=f'source == "{esc}"')
+    return res.get("delete_count", 0)

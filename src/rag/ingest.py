@@ -520,12 +520,12 @@ def _ocr_image(path: Path) -> str:
         return ""
 
 
-def ingest_image(path: Path) -> int:
+def ingest_image(path: Path, source: str | None = None) -> int:
     """图片入库：OCR 文字 + VLM 描述分别作为一个 chunk。"""
     chunks = _picture_chunks(path)
     if not chunks:
         return 0
-    return _embed_and_insert(chunks, path.name, "image")
+    return _embed_and_insert(chunks, source or path.name, "image")
 
 
 # ---------- 核心入库 ----------
@@ -554,14 +554,19 @@ def ingest_text(text: str, source: str = "inline", doc_type: str = "text") -> in
     return _embed_and_insert(chunks, source, doc_type)
 
 
-def ingest_file(path: str | Path) -> int:
-    """按文件类型入库，返回写入的 chunk 数。"""
+def ingest_file(path: str | Path, source: str | None = None) -> int:
+    """按文件类型入库，返回写入的 chunk 数。
+
+    source 为显示用的文件名（默认取 path.name）；
+    文件以 {doc_id}{ext} 存储时，外部应显式传入人类可读的文件名。
+    """
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"文件不存在: {path}")
+    source = source or path.name
 
     if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".webp"}:
-        return ingest_image(path)
+        return ingest_image(path, source)
 
     doc_type = path.suffix.lower().lstrip(".")
 
@@ -573,4 +578,4 @@ def ingest_file(path: str | Path) -> int:
         chunks = split_text(md_text) + extra_chunks
     else:
         chunks = split_text(_extract_text(path))
-    return _embed_and_insert(chunks, path.name, doc_type)
+    return _embed_and_insert(chunks, source, doc_type)

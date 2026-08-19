@@ -18,7 +18,13 @@ export interface HealthResponse {
   error: string;
 }
 
-export type TaskStatusValue = "pending" | "running" | "done" | "failed";
+export type TaskStatusValue =
+  | "pending"
+  | "awaiting_decision"
+  | "running"
+  | "done"
+  | "failed"
+  | "cancelled";
 
 export interface TaskStatus {
   task_id: string;
@@ -26,6 +32,7 @@ export interface TaskStatus {
   source: string;
   inserted: number;
   error: string;
+  conflict: boolean;
 }
 
 export interface UploadItem {
@@ -34,6 +41,16 @@ export interface UploadItem {
   status: "submitting" | TaskStatusValue;
   inserted: number;
   error: string;
+  taskId?: string;
+}
+
+export interface FileInfo {
+  doc_id: string;
+  filename: string;
+  doc_type: string;
+  chunk_count: number;
+  status: string;
+  uploaded_at: number;
 }
 
 export interface Message {

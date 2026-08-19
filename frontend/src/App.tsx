@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ask, health, submitIngest, taskStatus } from "./api";
+import { ask, deleteFile, health, listFiles, submitIngest, taskDecision, taskStatus } from "./api";
 import { Composer } from "./components/Composer";
+import { FilesView } from "./components/FilesView";
 import { Message } from "./components/Message";
 import { ThemeToggle } from "./components/ThemeToggle";
-import type { Message as MessageType, Theme, UploadItem } from "./types";
+import type { FileInfo, Message as MessageType, Theme, UploadItem } from "./types";
 
 const SUGGESTIONS = [
   "这个项目用了哪些模型？",
@@ -32,6 +33,9 @@ export default function App() {
   const [uploads, setUploads] = useState<UploadItem[]>([]);
   const [dragging, setDragging] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  const [view, setView] = useState<"chat" | "files">("chat");
+  const [files, setFiles] = useState<FileInfo[]>([]);
+  const [pendingDecision, setPendingDecision] = useState<UploadItem | null>(null);
   const chatRef = useRef<HTMLDivElement>(null);
   const dragDepth = useRef(0);
 
@@ -50,6 +54,12 @@ export default function App() {
       })
       .catch(() => setOnline(false));
   }, []);
+
+  // 进入知识库视图时刷新文件列表
+  useEffect(() => {
+    if (view === "files") refreshFiles();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view]);
 
   // 新消息自动滚动到底部
   useEffect(() => {
@@ -70,11 +80,34 @@ export default function App() {
       .catch(() => setOnline(false));
   }, []);
 
-  // 轮询单个入库任务，直到 done/failed
+  const refreshFiles = useCallback(() => {
+    listFiles()
+      .then((r) => setFiles(r.files))
+      .catch(() => {});
+  }, []);
+
+  // 轮询单个入库任务
   const pollTask = useCallback(
     (taskId: string, itemId: string) => {
       taskStatus(taskId)
         .then((st) => {
+          if (st.status === "awaiting_decision") {
+            // 同名冲突：弹窗等用户决策（一次处理一个）
+            setUploads((prev) =>
+              prev.map((u) => (u.id === itemId ? { ...u, status: "awaiting_decision" } : u))
+            );
+            setPendingDecision((prev) =>
+              prev ?? {
+                id: itemId,
+                name: st.source,
+                status: "awaiting_decision",
+                inserted: 0,
+                error: "",
+                taskId,
+              }
+            );
+            return; // 停止轮询，等决策
+          }
           setUploads((prev) =>
             prev.map((u) =>
               u.id === itemId
@@ -86,16 +119,17 @@ export default function App() {
             setTimeout(() => pollTask(taskId, itemId), 1500);
           } else {
             refreshHealth();
-            showToast(
-              st.status === "done"
-                ? `已入库「${st.source}」${st.inserted} 个片段`
-                : `「${st.source}」入库失败：${st.error || "未知错误"}`
-            );
+            refreshFiles();
+            if (st.status === "done") {
+              showToast(`已入库「${st.source}」${st.inserted} 个片段`);
+            } else if (st.status === "failed") {
+              showToast(`「${st.source}」入库失败：${st.error || "未知错误"}`);
+            }
           }
         })
         .catch(() => setTimeout(() => pollTask(taskId, itemId), 2000));
     },
-    [refreshHealth, showToast]
+    [refreshHealth, refreshFiles, showToast]
   );
 
   // 提交一批文件（每个文件一个异步任务，互不阻塞）
@@ -112,7 +146,9 @@ export default function App() {
         submitIngest(file)
           .then(({ task_id }) => {
             setUploads((prev) =>
-              prev.map((u) => (u.id === itemId ? { ...u, status: "pending" } : u))
+              prev.map((u) =>
+                u.id === itemId ? { ...u, status: "pending", taskId: task_id } : u
+              )
             );
             pollTask(task_id, itemId);
           })
@@ -126,6 +162,31 @@ export default function App() {
             );
           });
       }
+    },
+    [pollTask]
+  );
+
+  // 同名冲突决策
+  const decide = useCallback(
+    (item: UploadItem, action: "overwrite" | "rename" | "cancel") => {
+      if (!item.taskId) return;
+      setPendingDecision(null);
+      taskDecision(item.taskId, action)
+        .then(() => {
+          setUploads((prev) =>
+            prev.map((u) => (u.id === item.id ? { ...u, status: "running" } : u))
+          );
+          pollTask(item.taskId!, item.id);
+        })
+        .catch((e) => {
+          setUploads((prev) =>
+            prev.map((u) =>
+              u.id === item.id
+                ? { ...u, status: "failed", error: (e as Error).message }
+                : u
+            )
+          );
+        });
     },
     [pollTask]
   );
@@ -170,6 +231,20 @@ export default function App() {
     []
   );
 
+  const handleDelete = useCallback(
+    (docId: string, filename: string) => {
+      if (!window.confirm(`确定删除「${filename}」？将同时删除其在知识库中的全部片段。`)) return;
+      deleteFile(docId)
+        .then(() => {
+          refreshFiles();
+          refreshHealth();
+          showToast(`已删除「${filename}」`);
+        })
+        .catch((e) => showToast(`删除失败：${(e as Error).message}`));
+    },
+    [refreshFiles, refreshHealth, showToast]
+  );
+
   // ---------- 拖拽上传 ----------
 
   const onDragEnter = (e: React.DragEvent) => {
@@ -201,68 +276,119 @@ export default function App() {
     >
       <div className="aurora" aria-hidden="true" />
 
-      <header className="header">
-        <div className="wordmark">
+      <aside className="sidebar">
+        <div className="sidebar-brand">
           拾光<span className="dot" />
         </div>
-        <span className="status">
-          <span className="pulse" />
-          {online ? `已连接 · ${rows ?? 0} 片段` : "后端未连接"}
-        </span>
-        <div className="header-spacer" />
-        <ThemeToggle
-          theme={theme}
-          onToggle={() => setTheme((t) => (t === "light" ? "dark" : "light"))}
-        />
-      </header>
+        <nav className="sidebar-nav">
+          <button
+            className={view === "chat" ? "nav-btn active" : "nav-btn"}
+            onClick={() => setView("chat")}
+          >
+            <span className="nav-icon">💬</span>
+            问答
+          </button>
+          <button
+            className={view === "files" ? "nav-btn active" : "nav-btn"}
+            onClick={() => setView("files")}
+          >
+            <span className="nav-icon">📁</span>
+            知识库
+          </button>
+        </nav>
+      </aside>
 
-      <main className="chat" ref={chatRef}>
-        {messages.length === 0 ? (
-          <div className="empty">
-            <div className="eyebrow">BM25 · 语义检索 · RRF 融合</div>
-            <h1>问你的知识库</h1>
-            <p>上传或拖入文档建立知识库，再用自然语言提问。每一次回答都附上召回来源。</p>
-            <div className="suggestions">
-              {SUGGESTIONS.map((s) => (
-                <button
-                  key={s}
-                  className="suggestion"
-                  onClick={() => handleSend(s)}
-                >
-                  {s}
-                </button>
-              ))}
+      <div className="app-main">
+        <header className="header">
+          <div className="wordmark">
+            拾光<span className="dot" />
+          </div>
+          <span className="status">
+            <span className="pulse" />
+            {online ? `已连接 · ${rows ?? 0} 片段` : "后端未连接"}
+          </span>
+          <div className="header-spacer" />
+          <ThemeToggle
+            theme={theme}
+            onToggle={() => setTheme((t) => (t === "light" ? "dark" : "light"))}
+          />
+        </header>
+
+        {view === "chat" ? (
+          <main className="chat" ref={chatRef}>
+            {messages.length === 0 ? (
+              <div className="empty">
+                <div className="eyebrow">BM25 · 语义检索 · RRF 融合</div>
+                <h1>问你的知识库</h1>
+                <p>上传或拖入文档建立知识库，再用自然语言提问。每一次回答都附上召回来源。</p>
+                <div className="suggestions">
+                  {SUGGESTIONS.map((s) => (
+                    <button key={s} className="suggestion" onClick={() => handleSend(s)}>
+                      {s}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              messages.map((m) => <Message key={m.id} message={m} />)
+            )}
+          </main>
+        ) : (
+          <main className="content">
+            <FilesView files={files} onRefresh={refreshFiles} onDelete={handleDelete} />
+          </main>
+        )}
+
+        {uploads.length > 0 && (
+          <div className="uploads">
+            {uploads.map((u) => (
+              <div key={u.id} className={`upload-item ${u.status}`}>
+                <span className="upload-name">{u.name}</span>
+                {u.status === "submitting" ||
+                u.status === "pending" ||
+                u.status === "running" ? (
+                  <span className="upload-status running">
+                    <span className="spinner" />
+                    解析中…
+                  </span>
+                ) : u.status === "awaiting_decision" ? (
+                  <span className="upload-status running">等待处理同名文件…</span>
+                ) : u.status === "done" ? (
+                  <span className="upload-status done">✓ 入库 {u.inserted} 条</span>
+                ) : (
+                  <span className="upload-status failed">✕ {u.error || "失败"}</span>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {view === "chat" && <Composer onSend={handleSend} onUpload={submitFiles} />}
+
+        {toast && <div className="toast">{toast}</div>}
+      </div>
+
+      {dragging && <div className="drop-overlay">松开鼠标，上传文件到知识库</div>}
+
+      {pendingDecision && (
+        <div className="modal-mask">
+          <div className="modal">
+            <h3>文件名冲突</h3>
+            <p>知识库中已有「{pendingDecision.name}」，本次上传如何处理？</p>
+            <div className="modal-actions">
+              <button className="btn-primary" onClick={() => decide(pendingDecision, "overwrite")}>
+                覆盖旧文件
+              </button>
+              <button className="btn-primary" onClick={() => decide(pendingDecision, "rename")}>
+                另存为新文件（加后缀）
+              </button>
+              <button className="btn-danger" onClick={() => decide(pendingDecision, "cancel")}>
+                取消上传
+              </button>
             </div>
           </div>
-        ) : (
-          messages.map((m) => <Message key={m.id} message={m} />)
-        )}
-      </main>
-
-      {uploads.length > 0 && (
-        <div className="uploads">
-          {uploads.map((u) => (
-            <div key={u.id} className={`upload-item ${u.status}`}>
-              <span className="upload-name">{u.name}</span>
-              {u.status === "submitting" || u.status === "pending" || u.status === "running" ? (
-                <span className="upload-status running">
-                  <span className="spinner" />
-                  解析中…
-                </span>
-              ) : u.status === "done" ? (
-                <span className="upload-status done">✓ 入库 {u.inserted} 条</span>
-              ) : (
-                <span className="upload-status failed">✕ {u.error || "失败"}</span>
-              )}
-            </div>
-          ))}
         </div>
       )}
-
-      <Composer onSend={handleSend} onUpload={submitFiles} />
-
-      {toast && <div className="toast">{toast}</div>}
-      {dragging && <div className="drop-overlay">松开鼠标，上传文件到知识库</div>}
     </div>
   );
 }
