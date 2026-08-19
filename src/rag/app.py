@@ -84,7 +84,9 @@ def _run_ingest(task_id: str) -> None:
             t["progress"] = max(1, min(100, int(fraction * 100)))
 
     try:
-        n = ingest.ingest_file(files.final_path(doc_id, filename), source=filename, progress_cb=_cb)
+        n = ingest.ingest_file(
+            files.final_path(doc_id, filename), source=filename, doc_id=doc_id, progress_cb=_cb
+        )
         with _TASKS_LOCK:
             t.update({"status": "done", "inserted": n, "progress": 100})
         files.update(doc_id, chunk_count=n, status="done")
@@ -111,7 +113,7 @@ def _run_decision(task_id: str, action: str) -> None:
         old = files.find_by_filename(filename)
         if old:
             try:
-                store.delete_by_source(filename)
+                store.delete_by_doc_id(old["doc_id"])
             except Exception:  # noqa: BLE001
                 pass
             files.final_path(old["doc_id"], filename).unlink(missing_ok=True)
@@ -195,7 +197,7 @@ def _reconcile_stuck_files() -> None:
         if f.get("status") != "ingesting":
             continue
         try:
-            n = store.count_by_source(f["filename"])
+            n = store.count_by_doc_id(f["doc_id"])
         except Exception:  # noqa: BLE001
             n = 0
         if n > 0:
@@ -318,7 +320,7 @@ def delete_file(doc_id: str) -> dict:
     if not entry:
         raise HTTPException(status_code=404, detail="文件不存在")
     try:
-        store.delete_by_source(entry["filename"])
+        store.delete_by_doc_id(doc_id)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"删除向量失败: {e}")
     files.final_path(doc_id, entry["filename"]).unlink(missing_ok=True)

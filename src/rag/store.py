@@ -47,6 +47,7 @@ def _build_bm25_schema(client: MilvusClient):
     schema.add_field("sparse_bm25", DataType.SPARSE_FLOAT_VECTOR)
     schema.add_field("dense", DataType.FLOAT_VECTOR, dim=config.DENSE_DIM)
     schema.add_field("source", DataType.VARCHAR, max_length=512, nullable=True)
+    schema.add_field("doc_id", DataType.VARCHAR, max_length=32, nullable=True)
     schema.add_field("doc_type", DataType.VARCHAR, max_length=32, nullable=True)
     schema.add_field("metadata", DataType.VARCHAR, max_length=2048, nullable=True)
     return schema
@@ -98,14 +99,14 @@ def _migrate_legacy_collection(client: MilvusClient) -> None:
 def ensure_collection() -> None:
     """建集合（若不存在）并建索引。幂等，可重复调用。
 
-    若发现旧结构集合（缺 sparse_bm25 字段），自动做无损迁移。
+    若发现旧结构集合（缺 sparse_bm25 或 doc_id 字段），自动做无损迁移。
     """
     client = get_client()
     if client.has_collection(config.MILVUS_COLLECTION):
         desc = client.describe_collection(config.MILVUS_COLLECTION)
         fields = {f["name"] for f in desc.get("fields", [])}
-        if "sparse_bm25" not in fields:
-            logger.warning("检测到旧结构集合（缺 sparse_bm25 字段），执行无损迁移…")
+        if "sparse_bm25" not in fields or "doc_id" not in fields:
+            logger.warning("检测到旧结构集合（缺 sparse_bm25/doc_id 字段），执行无损迁移…")
             _migrate_legacy_collection(client)
         return
 
@@ -190,26 +191,26 @@ def count() -> int:
     return stats.get("row_count", 0)
 
 
-def count_by_source(source: str) -> int:
-    """统计指定来源（文件名）的 chunks 数。"""
+def count_by_doc_id(doc_id: str) -> int:
+    """统计指定 doc_id 的 chunks 数。"""
     client = get_client()
     if not client.has_collection(config.MILVUS_COLLECTION):
         return 0
-    esc = source.replace("\\", "\\\\").replace('"', '\\"')
+    esc = doc_id.replace("\\", "\\\\").replace('"', '\\"')
     res = client.query(
         config.MILVUS_COLLECTION,
-        filter=f'source == "{esc}"',
+        filter=f'doc_id == "{esc}"',
         output_fields=["pk"],
         consistency_level="Strong",
     )
     return len(res)
 
 
-def delete_by_source(source: str) -> int:
-    """删除指定来源（文件名）的全部 chunks，返回删除条数。"""
+def delete_by_doc_id(doc_id: str) -> int:
+    """删除指定 doc_id 的全部 chunks，返回删除条数。"""
     client = get_client()
     if not client.has_collection(config.MILVUS_COLLECTION):
         return 0
-    esc = source.replace("\\", "\\\\").replace('"', '\\"')
-    res = client.delete(config.MILVUS_COLLECTION, filter=f'source == "{esc}"')
+    esc = doc_id.replace("\\", "\\\\").replace('"', '\\"')
+    res = client.delete(config.MILVUS_COLLECTION, filter=f'doc_id == "{esc}"')
     return res.get("delete_count", 0)

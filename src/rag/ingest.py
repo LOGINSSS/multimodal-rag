@@ -520,12 +520,19 @@ def _ocr_image(path: Path) -> str:
         return ""
 
 
-def ingest_image(path: Path, source: str | None = None, progress_cb=None) -> int:
+def ingest_image(
+    path: Path,
+    source: str | None = None,
+    doc_id: str | None = None,
+    progress_cb=None,
+) -> int:
     """图片入库：OCR 文字 + VLM 描述分别作为一个 chunk。"""
     chunks = _picture_chunks(path)
     if not chunks:
         return 0
-    return _embed_and_insert(chunks, source or path.name, "image", progress_cb=progress_cb)
+    return _embed_and_insert(
+        chunks, source or path.name, "image", doc_id=doc_id, progress_cb=progress_cb
+    )
 
 
 # ---------- 核心入库 ----------
@@ -534,6 +541,7 @@ def _embed_and_insert(
     chunks: List[Dict],
     source: str,
     doc_type: str,
+    doc_id: str | None = None,
     progress_cb=None,
 ) -> int:
     """embedding + 写入 Milvus。
@@ -555,6 +563,7 @@ def _embed_and_insert(
             "text": c["text"],
             "dense": v,
             "source": source,
+            "doc_id": doc_id,
             "doc_type": doc_type,
             "metadata": json.dumps(c["metadata"], ensure_ascii=False),
         }
@@ -572,11 +581,13 @@ def ingest_text(text: str, source: str = "inline", doc_type: str = "text") -> in
 def ingest_file(
     path: str | Path,
     source: str | None = None,
+    doc_id: str | None = None,
     progress_cb=None,
 ) -> int:
     """按文件类型入库，返回写入的 chunk 数。
 
     source 为显示用的文件名（默认取 path.name）；
+    doc_id 为文件唯一 id（uuid），chunks 用它与文件关联，删除/覆盖按 doc_id 匹配；
     文件以 {doc_id}{ext} 存储时，外部应显式传入人类可读的文件名。
     progress_cb(fraction: 0~1)：进度回调（见 _embed_and_insert）。
     """
@@ -586,7 +597,7 @@ def ingest_file(
     source = source or path.name
 
     if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".webp"}:
-        return ingest_image(path, source, progress_cb=progress_cb)
+        return ingest_image(path, source, doc_id=doc_id, progress_cb=progress_cb)
 
     doc_type = path.suffix.lower().lstrip(".")
 
@@ -598,4 +609,4 @@ def ingest_file(
         chunks = split_text(md_text) + extra_chunks
     else:
         chunks = split_text(_extract_text(path))
-    return _embed_and_insert(chunks, source, doc_type, progress_cb=progress_cb)
+    return _embed_and_insert(chunks, source, doc_type, doc_id=doc_id, progress_cb=progress_cb)
