@@ -117,7 +117,8 @@ export default function App() {
             )
           );
           if (st.status === "pending" || st.status === "running") {
-            setTimeout(() => pollTask(taskId, itemId), 1500);
+            // 状态轮询间隔 30s，避免高频请求压后端（任务进度会稍慢更新）
+            setTimeout(() => pollTask(taskId, itemId), 30000);
           } else {
             refreshHealth();
             refreshFiles();
@@ -128,7 +129,7 @@ export default function App() {
             }
           }
         })
-        .catch(() => setTimeout(() => pollTask(taskId, itemId), 2000));
+        .catch(() => setTimeout(() => pollTask(taskId, itemId), 30000));
     },
     [refreshHealth, refreshFiles, showToast]
   );
