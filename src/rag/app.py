@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import logging
 import shutil
 import threading
 import time
@@ -21,6 +22,8 @@ from pydantic import BaseModel
 from . import config, files, ingest, store
 from .graph import run_rag
 from .observability import get_langfuse_callback
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="RAG 后端", version="0.1.0")
 
@@ -182,6 +185,30 @@ class TaskDecisionRequest(BaseModel):
 
 
 # ---------- 路由 ----------
+
+def _reconcile_stuck_files() -> None:
+    """启动时校正遗留的 ingesting 状态（进程重启会丢失内存任务）。
+
+    按 Milvus 实际条数修正：有 chunk → done + 校正 chunk_count；无 → failed。
+    """
+    for f in files.all_files():
+        if f.get("status") != "ingesting":
+            continue
+        try:
+            n = store.count_by_source(f["filename"])
+        except Exception:  # noqa: BLE001
+            n = 0
+        if n > 0:
+            logger.info("校正孤儿任务 %s -> done（%s 条）", f["filename"], n)
+            files.update(f["doc_id"], chunk_count=n, status="done")
+        else:
+            logger.warning("校正孤儿任务 %s -> failed（无数据）", f["filename"])
+            files.update(f["doc_id"], status="failed")
+
+
+# 启动时校正（放 app 构建后，避免循环导入）
+_reconcile_stuck_files()
+
 
 @app.get("/health")
 def health() -> dict:

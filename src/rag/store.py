@@ -190,6 +190,21 @@ def count() -> int:
     return stats.get("row_count", 0)
 
 
+def count_by_source(source: str) -> int:
+    """统计指定来源（文件名）的 chunks 数。"""
+    client = get_client()
+    if not client.has_collection(config.MILVUS_COLLECTION):
+        return 0
+    esc = source.replace("\\", "\\\\").replace('"', '\\"')
+    res = client.query(
+        config.MILVUS_COLLECTION,
+        filter=f'source == "{esc}"',
+        output_fields=["pk"],
+        consistency_level="Strong",
+    )
+    return len(res)
+
+
 def delete_by_source(source: str) -> int:
     """删除指定来源（文件名）的全部 chunks，返回删除条数。"""
     client = get_client()
