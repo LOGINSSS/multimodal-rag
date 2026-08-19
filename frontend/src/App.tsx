@@ -38,6 +38,13 @@ export default function App() {
   const [pendingDecision, setPendingDecision] = useState<UploadItem | null>(null);
   const chatRef = useRef<HTMLDivElement>(null);
   const dragDepth = useRef(0);
+  const uploadsRef = useRef<UploadItem[]>([]);
+  const recheckRef = useRef<() => void>(() => {});
+
+  // 用 ref 镜像 uploads，供 checkPending 读取最新状态
+  useEffect(() => {
+    uploadsRef.current = uploads;
+  }, [uploads]);
 
   // 应用主题到 <html>
   useEffect(() => {
@@ -80,7 +87,8 @@ export default function App() {
       .catch(() => {});
   }, []);
 
-  // 轮询单个入库任务
+  // 轮询单个入库任务：只轮询 running（正在解析/上传）的任务；
+  // pending 只显示灰色"排队中"不轮询，由任务完成时触发 recheck 感知其开始。
   const pollTask = useCallback(
     (taskId: string, itemId: string) => {
       taskStatus(taskId)
@@ -116,9 +124,11 @@ export default function App() {
                 : u
             )
           );
-          if (st.status === "pending" || st.status === "running") {
-            // 状态轮询间隔 30s，避免高频请求压后端（任务进度会稍慢更新）
+          if (st.status === "running") {
+            // 只轮询正在解析的任务；间隔 30s，避免高频请求压后端
             setTimeout(() => pollTask(taskId, itemId), 30000);
+          } else if (st.status === "pending") {
+            // pending：灰色"排队中"，不轮询；由 recheckPending 感知开始
           } else {
             refreshHealth();
             refreshFiles();
@@ -127,12 +137,45 @@ export default function App() {
             } else if (st.status === "failed") {
               showToast(`「${st.source}」入库失败：${st.error || "未知错误"}`);
             }
+            // 有任务完成（worker 空出）→ 顺带检查排队中的任务是否已开始
+            recheckRef.current();
           }
         })
         .catch(() => setTimeout(() => pollTask(taskId, itemId), 30000));
     },
     [refreshHealth, refreshFiles, showToast]
   );
+
+  // 事件驱动：任务完成时检查一次 pending 项，感知它们是否已开始（不做定时轮询）
+  const recheckPending = useCallback(() => {
+    const pending = uploadsRef.current.filter((u) => u.status === "pending" && u.taskId);
+    for (const u of pending) {
+      taskStatus(u.taskId!)
+        .then((st) => {
+          setUploads((prev) =>
+            prev.map((it) =>
+              it.id === u.id
+                ? {
+                    ...it,
+                    status: st.status,
+                    progress: st.progress ?? 0,
+                    inserted: st.inserted,
+                    error: st.error,
+                  }
+                : it
+            )
+          );
+          if (st.status === "running") {
+            pollTask(u.taskId!, u.id);
+          }
+        })
+        .catch(() => {});
+    }
+  }, [pollTask]);
+
+  useEffect(() => {
+    recheckRef.current = recheckPending;
+  }, [recheckPending]);
 
   // 提交一批文件（每个文件一个异步任务，互不阻塞）
   const submitFiles = useCallback(
@@ -353,9 +396,9 @@ export default function App() {
             {uploads.map((u) => (
               <div key={u.id} className={`upload-item ${u.status}`}>
                 <span className="upload-name">{u.name}</span>
-                {u.status === "submitting" ||
-                u.status === "pending" ||
-                u.status === "running" ? (
+                {u.status === "pending" ? (
+                  <span className="upload-status queued">排队中</span>
+                ) : u.status === "submitting" || u.status === "running" ? (
                   <span className="upload-status running">
                     <ProgressRing percent={u.status === "submitting" ? 0 : u.progress ?? 0} size={26} />
                     {u.status === "submitting" ? "上传中…" : `${u.progress ?? 0}%`}

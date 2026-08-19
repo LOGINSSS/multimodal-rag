@@ -749,6 +749,12 @@ body {
   color: var(--muted);
 }
 
+.upload-status.queued {
+  color: var(--muted);
+  font-style: italic;
+  opacity: 0.7;
+}
+
 .upload-status.done {
   color: var(--ok, #2e9e5b);
 }
